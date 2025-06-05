@@ -426,12 +426,18 @@ def build_world(facts: Dict[str, Any]) -> Dict[str, Any]:
 @tool
 def validate_consistency(old_facts: Dict[str, Any], new_facts: Dict[str, Any]) -> bool:
     """
-    For each key in our core schema (e.g. "location", "weather", "time_of_day"):
-      if old_facts[key] is not None and old_facts[key] != new_facts[key], return False.
+    Validate that the new_facts do not contradict the old_facts.
+    For each core key ("location", "weather", "time_of_day"):
+      - If old_facts[key] is not None and new_facts[key] is not None
+        and they differ, return False (inconsistent).
     Otherwise, return True.
     """
     core_keys = ["location", "weather", "time_of_day"]
-    for k in core_keys:
-        if old_facts.get(k) and new_facts.get(k) and old_facts[k] != new_facts[k]:
+
+    for key in core_keys:
+        old_val = old_facts.get(key)
+        new_val = new_facts.get(key)
+        if old_val is not None and new_val is not None and old_val != new_val:
             return False
+
     return True
