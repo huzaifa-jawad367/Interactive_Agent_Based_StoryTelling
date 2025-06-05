@@ -21,6 +21,17 @@ if not HF_TOKEN:
 #    model_name = "meta-llama/Llama-2-7b-chat-hf"
 model_name = "meta-llama/Llama-2-7b-chat-hf"
 
+# Lazily instantiate a single InferenceClientModel
+_hf_client: Optional[InferenceClientModel] = None
+
+def _get_hf_client() -> InferenceClientModel:
+    global _hf_client
+    if _hf_client is None:
+        _hf_client = InferenceClientModel(
+            model_name=model_name,
+            api_token=HF_TOKEN
+        )
+    return _hf_client
 
 class StoryGeneratorTool(Tool):
     """
@@ -279,19 +290,138 @@ class ExtractFactsTool(Tool):
 @tool
 def generate_choices(scene_text: str, facts: Dict[str, Any]) -> List[str]:
     """
-    Prompt the LLM:
-      “Given this scene: {scene_text} and these known facts: {facts_json},
-       propose two or three short next‐step choices for the reader.”
+    Generate between 2 and 4 next-step choices for the reader,
+    based on the current scene_text and known facts.
+
+    Inputs:
+      - scene_text: The latest narrative paragraph.
+      - facts: A dict of structured facts (e.g., location, weather, npc_states, etc.)
+
+    Output:
+      - A list of 2–4 short choice strings.
     """
-    return ["Go left", "Go right"]  # placeholder
+
+    # Serialize facts to JSON for inclusion in the prompt
+    facts_json = json.dumps(facts, indent=2)
+
+    prompt = f"""
+                You are an interactive‐story choice generator. 
+                Given the following scene and the known facts, propose between 2 and 4 plausible next‐step choices.
+                Return your answer as a JSON array of strings (e.g., ["Choice 1", "Choice 2", "Choice 3"]).
+
+                Scene:
+                \"\"\"
+                {scene_text}
+                \"\"\"
+
+                Facts (JSON):
+                {facts_json}
+
+                Requirements:
+                  - Provide at least 2 choices, and at most 4 choices.
+                  - Each choice should be a concise action or decision (no more than one sentence each).
+                  - Do not include any extra commentary—only output the JSON array.
+              """
+
+    system_msg = {
+        "role": "system",
+        "content": "You generate short, actionable choices for an interactive story."
+    }
+    user_msg = {"role": "user", "content": prompt}
+
+    # Call the HF chat model via InferenceClientModel
+    hf_client = _get_hf_client()
+    resp = hf_client.chat(
+        messages=[system_msg, user_msg],
+        temperature=0.8,
+        max_tokens=150
+    )
+
+    # The response should be a JSON array of strings
+    raw = resp.strip()
+    try:
+        choices = json.loads(raw)
+        # Ensure it's a list of strings and has between 2 and 4 elements
+        if (
+            isinstance(choices, list)
+            and 2 <= len(choices) <= 4
+            and all(isinstance(c, str) for c in choices)
+        ):
+            return choices
+        # If the model returned something malformed or wrong length, fall back
+        raise ValueError
+    
+    # TODO: handle specific parsing errors more gracefully
+    except Exception:
+        # Fallback: return two generic choices
+        return ["Continue forward", "Turn back"]
 
 @tool
-def expand_world_description(facts: Dict[str, Any]) -> str:
+def build_world(facts: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Given a dictionary like {'location': 'rainy_forest', 'weather':'rainy', …},
-    return a single paragraph describing the environment vividly.
+    Given a structured `facts` dictionary (e.g., containing keys like 'location',
+    'weather', 'time_of_day', 'npc_states', etc.), return a detailed world-building
+    dictionary with:
+      - setting_description: a paragraph describing the environment vividly
+      - flora: a list of typical plants or vegetation present
+      - fauna: a list of common animals or creatures in this setting
+      - ambiance: sensory details (sound, smell, feel) to enrich the scene
     """
-    return f"A {facts.get('weather', 'quiet')} day in the {facts.get('location', 'forest')}..."
+    # Serialize facts into JSON for the prompt
+    facts_json = json.dumps(facts, indent=2)
+
+    prompt = f"""
+                You are a world-building assistant. Given the following structured facts in JSON:
+
+                {facts_json}
+
+                Generate a JSON object with these fields:
+                  1) setting_description: a 2-3 sentence vivid paragraph describing the environment.
+                  2) flora: a list of 3-5 plant species or vegetation commonly found in this location.
+                  3) fauna: a list of 3-5 animals or creatures one might encounter here.
+                  4) ambiance: a list of 3-5 sensory details (sounds, smells, tactile sensations) that bring the scene to life.
+
+                Return ONLY valid JSON with exactly those four keys. If a particular field is not applicable,
+                you may return an empty list for flora/fauna/ambiance, but always include all four keys.
+              """
+
+    system_msg = {
+        "role": "system",
+        "content": "You convert structured facts into a detailed world-building dictionary."
+    }
+    user_msg = {"role": "user", "content": prompt}
+
+    hf_client = _get_hf_client()
+    resp = hf_client.chat(
+        messages=[system_msg, user_msg],
+        temperature=0.7,
+        max_tokens=300
+    )
+    raw = resp.strip()
+
+    try:
+        world_dict = json.loads(raw)
+    except Exception:
+        # Fallback to a minimal structure using only the basic facts
+        world_dict = {
+            "setting_description": f"A {facts.get('weather', 'calm')} scene in the {facts.get('location', 'unknown location')}.",
+            "flora": [],
+            "fauna": [],
+            "ambiance": []
+        }
+
+    # Ensure all required keys exist
+    defaults = {
+        "setting_description": "",
+        "flora": [],
+        "fauna": [],
+        "ambiance": []
+    }
+    for key, default_val in defaults.items():
+        if key not in world_dict:
+            world_dict[key] = default_val
+
+    return world_dict
 
 @tool
 def validate_consistency(old_facts: Dict[str, Any], new_facts: Dict[str, Any]) -> bool:
