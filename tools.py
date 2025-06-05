@@ -8,8 +8,8 @@ import os
 
 
 # Make sure your HF token is set in the environment already:
-#   export HUGGINGFACE_API_TOKEN="hf_YourTokenHere"
-HF_TOKEN = os.getenv("REDACTED", "")
+#   export HUGGINGFACE_API_TOKEN="Enter your hf token"
+HF_TOKEN = os.getenv("Enter your hf token", "")
 if not HF_TOKEN:
     raise RuntimeError("Please set HUGGINGFACE_API_TOKEN in your environment.")
 
