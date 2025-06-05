@@ -3,13 +3,11 @@
 import os
 from smolagents import CodeAgent, InferenceClientModel
 
-from tools import (
-    story_generator_tool,
-    extract_facts_tool,
-    generate_choices,
-    build_world,
-    validate_consistency,
-)
+from Tools.build_world import build_world
+from Tools.extract_facts import ExtractFactsTool
+from Tools.story_generator import StoryGeneratorTool
+from Tools.validate_consistency import validate_consistency
+from Tools.generate_choices import generate_choices
 
 # Ensure your HF token is set in the environment:
 # export HUGGINGFACE_API_TOKEN="hf_YourTokenHere"
@@ -25,12 +23,12 @@ _qwen_model = InferenceClientModel(
 
 # Create agent instances
 _story_agent = CodeAgent(
-    tools=[story_generator_tool],
+    tools=[StoryGeneratorTool],
     model=_qwen_model
 )
 
 _fact_agent = CodeAgent(
-    tools=[extract_facts_tool],
+    tools=[ExtractFactsTool],
     model=_qwen_model
 )
 

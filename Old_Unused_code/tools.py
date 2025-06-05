@@ -21,9 +21,6 @@ if not HF_TOKEN:
 #    model_name = "meta-llama/Llama-2-7b-chat-hf"
 model_name = "meta-llama/Llama-2-7b-chat-hf"
 
-# Lazily instantiate a single InferenceClientModel
-_hf_client: Optional[InferenceClientModel] = None
-
 def _get_hf_client() -> InferenceClientModel:
     global _hf_client
     if _hf_client is None:
