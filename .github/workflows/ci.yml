@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [ main ]
   push:
-    branches: [ main, huzaifa-jawad ]
+    branches: [ main, huzaifa-jawad, shehroz ]
 
 jobs:
   build-and-test:
