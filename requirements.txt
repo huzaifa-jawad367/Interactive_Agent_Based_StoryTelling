@@ -1,0 +1,14 @@
+gradio[mcp]
+fastapi 
+uvicorn
+smolagents
+requests
+openai 
+python-dotenv
+torch 
+transformers
+diffusers 
+accelerate
+TTS
+python-multipart
+modal
