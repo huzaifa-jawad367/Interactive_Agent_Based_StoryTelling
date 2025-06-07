@@ -1,153 +1,123 @@
-# Tools/story_generator_tool.py
-# Author: Huzaifa Jawad
-# Date: 2025-06-05
+# story_generator.py
 
-from typing import Dict, Any, List
-from smolagents import Tool, InferenceClientModel
 from typing import Optional
 import os
 
+from smolagents import Tool
+from huggingface_hub import InferenceClient
 
-# Make sure your HF token is set in the environment already:
-#   export HUGGINGFACE_API_TOKEN="Enter your hf token"
-HF_TOKEN = os.getenv("Enter your hf token", "")
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+import torch
+torch.manual_seed(30)
+
+
+HF_TOKEN   = os.getenv("HUGGINGFACE_API_TOKEN", "")
+MODEL_NAME = "deepseek-ai/DeepSeek-V3-0324"
+
 if not HF_TOKEN:
     raise RuntimeError("Please set HUGGINGFACE_API_TOKEN in your environment.")
 
-# === Choose your HF model name here ===
-# For instance, "gpt2‐hf‐chat", or any chat‐capable endpoint. 
-# If you are using a locally‐deployed endpoint, point to its URL:
-#    model_name = "https://api-inference.huggingface.co/models/your-username/your-chat-model"
-# If you want to use an HF‐hosted chat LLM (e.g. a fine‐tuned Llama 2), use:
-#    model_name = "meta-llama/Llama-2-7b-chat-hf"
-model_name = "meta-llama/Llama-2-7b-chat-hf"
-
 class StoryGeneratorTool(Tool):
-    """
-    A single tool that handles both:
-    1) The very first user prompt (initial prompt → generate opening scene), and
-      2) All subsequent steps (last_choice + context → generate next scene).
-      
-    INPUTS:
-      - initial_prompt (optional): 
-          The user's very first textual prompt (“There is a girl who walked…”). 
-          Exactly one of initial_prompt or last_choice must be provided per call.
-      - last_choice (optional): 
-          The user’s selected choice from the previous step. 
-      - context (required): 
-          The concatenated last N scenes + facts (via StoryState.get_context_window).
-          
-    OUTPUT:
-      - A single string: the newly generated “scene text” from the LLM.
-    """
-
-    name = "story_generator"
-    description = """
-    Generates the next paragraph (scene) of the interactive story. 
-    If initial_prompt is provided, uses that as the story’s seed. 
-    Otherwise, uses last_choice + context (recent scenes/facts) to continue.
-    """
+    name        = "story_generator"
+    description = "Generates the next scene of an interactive story."
 
     inputs = {
+        "context": {
+            "type": "string",
+            "description": "Concatenated last N scenes + facts.",
+            "required": True
+        },
         "initial_prompt": {
             "type": "string",
-            "description": "The very first user prompt to start the story. Mutually exclusive with last_choice.",
+            "description": "The very first user prompt to start the story.",
             "required": False,
+            "nullable": True
         },
         "last_choice": {
             "type": "string",
-            "description": "The user’s choice from the previous step. Mutually exclusive with initial_prompt.",
+            "description": "The user’s choice from the previous step.",
             "required": False,
-        },
-        "context": {
-            "type": "string",
-            "description": (
-                "Concatenated recent scenes + facts (via StoryState.get_context_window). "
-                "If this is the first prompt, context can be an empty string."
-            ),
-            "required": True,
+            "nullable": True
         },
     }
 
     output_type = "string"
+    _client: Optional[InferenceClient] = None
 
-    # We’ll lazily create a single InferenceClientModel instance and reuse it.
-    _hf_client: Optional[InferenceClientModel] = None
-
-    def _get_hf_client(self) -> InferenceClientModel:
-        """
-        Return a singleton InferenceClientModel, authenticated via HUGGINGFACE_API_TOKEN.
-        """
-        if StoryGeneratorTool._hf_client is None:
-            StoryGeneratorTool._hf_client = InferenceClientModel(
-                model_name=model_name,
-                api_token=HF_TOKEN
-            )
-        return StoryGeneratorTool._hf_client
+    def _get_client(self) -> InferenceClient:
+        if self._client is None:
+            self._client = InferenceClient(token=HF_TOKEN)
+        return self._client
 
     def forward(
         self,
+        context: str,
         initial_prompt: Optional[str] = None,
-        last_choice: Optional[str] = None,
-        context: str = "",
+        last_choice:  Optional[str] = None,
     ) -> str:
-        """
-        Build and send a dynamic LLM prompt depending on whether we're starting fresh
-        (initial_prompt != None) or continuing (last_choice != None). Returns the new scene.
-        """
-        # 1) Both provided → error
-        if initial_prompt is not None and last_choice is not None:
-            raise ValueError(
-                "Provide exactly one of `initial_prompt` or `last_choice`, not both."
-            )
+        if initial_prompt and last_choice:
+            raise ValueError("Provide exactly one of `initial_prompt` or `last_choice`.")
 
-        # 1) If this is the very first call, we only have initial_prompt:
-        if initial_prompt is not None:
-            system_msg = {
-                "role": "system",
-                "content": (
-                    "You are a creative, children’s‐book style storyteller. "
-                    "The user has provided the very first seed of the story. "
-                    "Generate a vivid opening scene."
-                ),
-            }
+        # Build prompt
+        if initial_prompt:
+            system_content = (
+                "You are a children's-book style storyteller. Generate a vivid opening scene."
+            )
             user_content = f"User seed prompt:\n\"{initial_prompt}\"\n\nGenerate the opening scene."
-            # We ignore `context` on the first call (it can be an empty string).
-        elif last_choice is not None:
-            # 2) We are in a follow‐up step (we have last_choice and some context):
-            system_msg = {
-                "role": "system",
-                "content": (
-                    "You are a creative, children’s‐book style storyteller. "
-                    "Continue the story from the last choice, integrating the provided context."
-                ),
-            }
+
+        elif last_choice:
+            system_content = (
+                "You are a children's-book style storyteller. Continue from the last choice."
+            )
             user_content = (
-                f"Context (recent scenes + facts):\n{context}\n\n"
-                f"Last choice: \"{last_choice}\"\n\n"
-                "Generate the next scene."
+                f"Context:\n{context}\n\n"
+                f"Last choice: \"{last_choice}\"\n\nGenerate the next scene."
             )
 
         else:
-            system_msg = (
-                "You are a creative, children’s‐book style storyteller. "
-                "Continue the story based on the given context alone."
+            system_content = (
+                "You are a children's-book style storyteller. Continue based on context alone."
             )
-            user_content = f"Context (recent scenes + facts):\n{context}\n\nGenerate the next scene."
+            user_content = f"Context:\n{context}\n\nGenerate the next scene."
 
         messages = [
-          {"role": "system", "content": system_msg["content"]},
-          {"role": "user", "content": user_content},
+            {"role": "system", "content": system_content},
+            {"role": "user",   "content": user_content},
         ]
 
+        # 1) Tokenize/conform the messages
+        tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3-0324")
+        model     = AutoModelForCausalLM.from_pretrained(
+            "deepseek-ai/DeepSeek-V3-0324", device_map="auto", torch_dtype=torch.bfloat16
+        )
 
-        # 3) Call the HF chat model via InferenceClientModel:
-        hf_client = self._get_hf_client()
-        resp = hf_client.chat(messages=messages, temperature=0.7, max_tokens=400)
+        inputs = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(model.device)
 
-        # The HF inference endpoint usually returns a dict with {"generated_text": "..."} or
-        # a list of completions. SmolAgents’ InferenceClientModel.chat() will normalize that
-        # and just return the assistant’s reply string.
-        scene_text = resp  # smolagents normalizes to a simple string
+        # 2) Generate
+        outputs = model.generate(**inputs, max_new_tokens=400)
 
+        # 3) Extract only the generated portion (not the prompt)
+        input_length = inputs["input_ids"].shape[-1]
+        generated_ids = outputs[0][input_length:]
+
+        # 4) Decode and return
+        scene_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        
         return scene_text
+
+        # client = self._get_client()
+        # # Non‐streaming chat call
+        # resp = client.chat_completion(
+        #     model=MODEL_NAME,
+        #     messages=messages,
+        #     temperature=0.7,
+        #     max_tokens=400,
+        #     stream=False
+        # )
+
+        # return 
