@@ -1,131 +1,91 @@
 # tools.py
 
-from typing import Dict, Any, List
-from smolagents import tool, Tool, InferenceClientModel
-from typing import Optional
-import json
+from typing import Dict, Any
+from smolagents import Tool
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
 import os
+import json
 
-# Make sure your HF token is set in the environment already:
-#   export HUGGINGFACE_API_TOKEN="Enter your hf token"
-HF_TOKEN = os.getenv("Enter your hf token", "")
-if not HF_TOKEN:
-    raise RuntimeError("Please set HUGGINGFACE_API_TOKEN in your environment.")
+# Local model to use for fact extraction
+MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 
-# === Choose your HF model name here ===
-# For instance, "gpt2‐hf‐chat", or any chat‐capable endpoint. 
-# If you are using a locally‐deployed endpoint, point to its URL:
-#    model_name = "https://api-inference.huggingface.co/models/your-username/your-chat-model"
-# If you want to use an HF‐hosted chat LLM (e.g. a fine‐tuned Llama 2), use:
-#    model_name = "meta-llama/Llama-2-7b-chat-hf"
-model_name = "meta-llama/Llama-2-7b-chat-hf"
+# Cache tokenizer and model at class‐level so we only load once
+_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+_model     = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    device_map="auto",
+    torch_dtype=torch.bfloat16
+)
+_model.eval()
+
 
 class ExtractFactsTool(Tool):
     """
-    Extracts structured facts from a given scene text. Returns a dictionary with:
-      - location (string or null)
-      - weather (string or null)
-      - time_of_day (string or null)
-      - main_character (string or null)
-      - npc_states (dict mapping NPC name -> {status, location})
-      - inventory_items (list of strings)
-      - events (1-2 sentence open-ended summary of what happened)
+    Extracts structured facts from a scene using a local Transformers LLM.
     """
 
-    name = "extract_facts"
-    description = """
-    Given a scene paragraph, extract a detailed JSON-formatted fact base including:
-      • location
-      • weather
-      • time_of_day
-      • main_character
-      • npc_states (map of {name: {status, location}})
-      • inventory_items (list of strings)
-      • events (an open-ended 1-2 sentence summary of key happenings)
-    """
+    name        = "extract_facts"
+    description = (
+        "Given a narrative paragraph, extracts and returns JSON with keys: "
+        "location, weather, time_of_day, main_character, npc_states, "
+        "inventory_items, events."
+    )
 
     inputs = {
         "scene_text": {
             "type": "string",
             "description": "The narrative paragraph from which to extract facts.",
-            "required": True,
+            "required": True
         }
     }
-    output_type = "dict"
-
-    _hf_client: InferenceClientModel = None
-
-    def _get_hf_client(self) -> InferenceClientModel:
-        """
-        Lazy-instantiates a single InferenceClientModel for the HF chat endpoint.
-        """
-        if ExtractFactsTool._hf_client is None:
-            ExtractFactsTool._hf_client = InferenceClientModel(
-                model_name=model_name,
-                api_token=HF_TOKEN
-            )
-        return ExtractFactsTool._hf_client
+    # Change output_type from "json" or "dict" to "object"
+    output_type = "object"
 
     def forward(self, scene_text: str) -> Dict[str, Any]:
+        # 1) Build the instruction + content prompt
         prompt = f"""
-          You are a fact-extraction assistant. Below is a single scene from an interactive story:
+                    You are a fact-extraction assistant. Extract exactly the following keys and output valid JSON:
+                    1) location: e.g. "rainy_forest" or null
+                    2) weather: e.g. "rainy" or null
+                    3) time_of_day: e.g. "evening" or null
+                    4) main_character: protagonist name or null
+                    5) npc_states: dict of other characters → {{status, location}}, or {{}}
+                    6) inventory_items: list of item names, or []
+                    7) events: 1–2 sentence summary of what happened
 
-          \"\"\"
-          {scene_text}
-          \"\"\"
+                    Scene:
+                    \"\"\"
+                    {scene_text}
+                    \"\"\"
+                  """
 
-          Extract exactly the following fields and output valid JSON:
-            1) location: (e.g. "rainy_forest" or null if not mentioned)
-            2) weather: (e.g. "rainy", "sunny", or null)
-            3) time_of_day: (e.g. "morning", "dusk", or null)
-            4) main_character: (name of the protagonist, or null if not obvious)
-            5) npc_states: a dictionary mapping any other named characters to their status and location.
-              Example:
-                "npc_states": {
-                  "Grandma": {"status": "waiting", "location": "cottage"},
-                  "Wolf": {"status": "lurking", "location": "forest_edge"}
-                }
-              If no NPCs are present, return an empty object `{{}}`.
-            6) inventory_items: a list of any items the main character now has (e.g., ["lantern", "map"]), or [] if none.
-            7) events: a 1-2 sentence open-ended summary of what key happened events occurred in this scene.
+        # 2) Tokenize using the chat template
+        # The output of apply_chat_template with return_tensors="pt" is a single tensor.
+        # It does not need to be converted to a dictionary for model.generate.
+        inputs_tensor = _tokenizer.apply_chat_template(
+            [{"role":"system","content":"You extract JSON facts."},
+             {"role":"user","content":prompt}],
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(_model.device)
 
-          Do NOT output any keys other than the seven listed above.  
-          If a field is not mentioned, set it to `null` (for strings) or `[]`/`{{}}` as appropriate.
-        """
+        # 3) Generate up to 256 new tokens
+        with torch.no_grad():
+            # Pass the tensor directly to generate
+            outputs = _model.generate(inputs_tensor, max_new_tokens=256)
 
-        # Build chat messages
-        system_msg = {
-            "role": "system",
-            "content": "You extract structured facts from a story scene and return valid JSON."
-        }
-        user_msg = {"role": "user", "content": prompt}
+        # 4) Slice off the prompt tokens
+        input_len = inputs_tensor.size(-1) # Use inputs_tensor to get the original input length
+        gen_ids   = outputs[0][input_len:]
 
-        # Call HF chat model via InferenceClientModel
-        hf_client = self._get_hf_client()
-        resp = hf_client.chat(
-            messages=[system_msg, user_msg],
-            temperature=0.0,
-            max_tokens=400
-        )
+        # 5) Decode and strip out anything before the first '{'
+        raw = _tokenizer.decode(gen_ids, skip_special_tokens=True)
+        json_start = raw.find("{")
+        candidate = raw[json_start:] if json_start >= 0 else raw
 
-        # `resp` should be a single JSON string (or a plain dict if the HF endpoint returns JSON directly)
-        json_str = resp.strip()
-
-        # Safely parse the JSON; on failure, return empty/default schema
-        try:
-            fact_dict = json.loads(json_str)
-        except Exception:
-            fact_dict = {
-                "location": None,
-                "weather": None,
-                "time_of_day": None,
-                "main_character": None,
-                "npc_states": {},
-                "inventory_items": [],
-                "events": ""
-            }
-
-        # Ensure all keys exist (fill missing with defaults)
+        # 6) Parse JSON (fallback to defaults on error)
         defaults = {
             "location": None,
             "weather": None,
@@ -135,8 +95,13 @@ class ExtractFactsTool(Tool):
             "inventory_items": [],
             "events": ""
         }
-        for key, default_val in defaults.items():
-            if key not in fact_dict:
-                fact_dict[key] = default_val
+        try:
+            fact_dict = json.loads(candidate)
+        except Exception:
+            fact_dict = defaults.copy()
+
+        # 7) Ensure all required keys exist
+        for k, v in defaults.items():
+            fact_dict.setdefault(k, v)
 
         return fact_dict
