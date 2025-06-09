@@ -1,4 +1,3 @@
-# check_significant_change_tool.py
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from smolagents import tool
