@@ -1,4 +1,4 @@
-# hume_storybook_narrator.py
+
 # Simplified Hume TTS tool for storybook narration in Kaggle
 #-------------libraries to install----------#
 # !pip install hume smolagents nest-asyncio
