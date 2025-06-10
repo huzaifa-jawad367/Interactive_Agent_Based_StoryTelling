@@ -1,20 +1,9 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+# from transformers import AutoTokenizer, AutoModelForCausalLM
+from llm_utils import tokenizer, model, generate_completion
 from smolagents import tool
 import warnings
 warnings.filterwarnings("ignore")
-
-# ——————————————————————————————
-# Global Mistral-7B-Instruct model for change detection
-CHOICE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
-_tokenizer_ch = AutoTokenizer.from_pretrained(CHOICE_MODEL)
-_model_ch = AutoModelForCausalLM.from_pretrained(
-    CHOICE_MODEL,
-    device_map="auto",
-    torch_dtype=torch.bfloat16
-)
-_model_ch.eval()
-# ——————————————————————————————
 
 @tool
 def check_significant_change(previous_context: str, current_context: str) -> int:
@@ -43,22 +32,22 @@ Answer (change or unchange):"""
     ]
 
     # tokenize & move to device
-    inputs = _tokenizer_ch.apply_chat_template(
+    inputs = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
         add_generation_prompt=True,
         return_tensors="pt",
         return_dict=True
-    ).to(_model_ch.device)
+    ).to(model.device)
 
     # generate
     with torch.no_grad():
-        outputs = _model_ch.generate(
+        outputs = generate_completion(
             **inputs,
             max_new_tokens=10,
             temperature=0.0,
             do_sample=False,
-            pad_token_id=_tokenizer_ch.eos_token_id
+            pad_token_id=tokenizer.eos_token_id
         )
 
     # slice off prompt
@@ -66,7 +55,7 @@ Answer (change or unchange):"""
     gen_ids = outputs[0][prompt_len:]
 
     # decode response
-    raw = _tokenizer_ch.decode(gen_ids, skip_special_tokens=True)
+    raw = tokenizer.decode(gen_ids, skip_special_tokens=True)
     response = raw.strip().lower()
 
     # check for change indicators

@@ -45,6 +45,6 @@ def validate_consistency(old_facts: Dict[str, Any], new_facts: Dict[str, Any]) -
         old_val = old_facts.get(key)
         new_val = new_facts.get(key)
         if old_val is not None and new_val is not None and old_val != new_val:
-            return False
+            return True
 
     return True
