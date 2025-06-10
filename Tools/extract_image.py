@@ -1,78 +1,95 @@
-import json
-from typing import Any, Dict
+# scene_extractor_tool.py
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from smolagents import tool
+import warnings
+warnings.filterwarnings("ignore")
 
-from your_tool_base import Tool            # Replace with wherever “Tool” is defined
-from huggingface_hub.hf_api import HfFolder
-from your_inference_client import InferenceClientModel   # Replace with your actual HF client import
+# ——————————————————————————————
+# Global Mistral-7B-Instruct model for scene extraction
+CHOICE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
+_tokenizer_ch = AutoTokenizer.from_pretrained(CHOICE_MODEL)
+_model_ch = AutoModelForCausalLM.from_pretrained(
+    CHOICE_MODEL,
+    device_map="auto",
+    torch_dtype=torch.bfloat16
+)
+_model_ch.eval()
+# ——————————————————————————————
 
-# (Make sure HF_TOKEN is already defined in your environment)
-model_name = "meta-llama/Llama-2-7b-chat-hf"
-
-class ExtractSceneTool(Tool):
+@tool
+def extract_scene(context_text: str) -> str:
     """
-    Extracts the single most “image-worthy” scene from a block of story context,
-    and formats it as a standalone description. Returns exactly one paragraph
-    (string) that an image-generation model can consume.
+    Identify and return one vivid paragraph describing the key visual scene (<=77 tokens).
+    
+    Args:
+        context_text (str): The input text to extract a visual scene from
+    
+    Returns:
+        str: A vivid paragraph describing the key visual scene
     """
+    prompt = f"""
+You are a visual scene extractor. Given the text below, identify the key visual moment and describe it in one vivid, concise paragraph (maximum 77 tokens). Focus on the most striking visual elements and atmosphere. Return only the scene description.
 
-    name = "extract_scene"
-    description = """
-    Given a chunk of narrative (one or more paragraphs), pick out the single most
-    visually striking or important scene and rewrite it as a standalone prompt.
-    The output should be a concise, vivid paragraph describing that scene in
-    “cartoonic” (or whatever style you request) detail, ready for an image model.
-    No JSON—just return raw text.
-    """
-
-    inputs = {
-        "context_text": {
-            "type": "string",
-            "description": "One or more paragraphs of story. The tool should identify the key moment and produce an image prompt.",
-            "required": True,
-        }
-    }
-    output_type = "string"
-
-    _hf_client: InferenceClientModel = None
-
-    def _get_hf_client(self) -> InferenceClientModel:
-        """
-        Lazy-instantiates a single InferenceClientModel for the HF chat endpoint.
-        """
-        if ExtractSceneTool._hf_client is None:
-            # Save your token to disk if not already done:
-            # HfFolder.save_token(HF_TOKEN)
-            ExtractSceneTool._hf_client = InferenceClientModel(
-                model_name=model_name,
-                api_token=HF_TOKEN
-            )
-        return ExtractSceneTool._hf_client
-
-    def forward(self, context_text: str) -> str:
-        # 1) Build the instruction prompt
-        prompt = f"""
-You are a scene-extraction assistant for an image-generation pipeline. Below is a block of story text:
-
+Text:
 \"\"\"
 {context_text}
 \"\"\"
 
-Identify the single most important, visually striking moment (or “scene”) from this excerpt that would best translate into a cartoon‐style illustration. Then, write that scene as one concise, vivid paragraph, focusing on exactly what should appear in the image (characters, setting, lighting, mood, and any key objects). Do NOT output JSON—just return a straightforward, self-contained description suitable for plugging into a Stable Diffusion prompt.
-"""
+Visual description:"""
 
-        system_msg = {
-            "role": "system",
-            "content": "You extract the most “image-worthy” moment from the story context and return a single descriptive paragraph for illustration."
-        }
-        user_msg = {"role": "user", "content": prompt}
+    # wrap in a chat template
+    messages = [
+        {"role": "system", "content": "You extract vivid visual scenes from text."},
+        {"role": "user", "content": prompt}
+    ]
 
-        # 2) Call the chat model
-        hf_client = self._get_hf_client()
-        resp = hf_client.chat(
-            messages=[system_msg, user_msg],
+    # tokenize & move to device
+    inputs = _tokenizer_ch.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True
+    ).to(_model_ch.device)
+
+    # generate
+    with torch.no_grad():
+        outputs = _model_ch.generate(
+            **inputs, 
+            max_new_tokens=100,
             temperature=0.0,
-            max_tokens=150
+            do_sample=False,
+            pad_token_id=_tokenizer_ch.eos_token_id
         )
 
-        # 3) Return the raw text (no JSON parsing)
-        return resp.strip()
+    # slice off prompt
+    prompt_len = inputs["input_ids"].shape[-1]
+    gen_ids = outputs[0][prompt_len:]
+
+    # decode response
+    raw = _tokenizer_ch.decode(gen_ids, skip_special_tokens=True)
+    response = raw.strip()
+
+    # ensure within token limit and not empty
+    if response:
+        words = response.split()
+        if len(words) > 77:
+            response = ' '.join(words[:77])
+        return response
+    else:
+        # fallback to first sentence if no response
+        return context_text.split('.')[0] + '.'
+
+if __name__ == "__main__":
+    # --- Test Cases ---
+    contexts = [
+        "The wizard stood atop the crystal tower as lightning crackled around his staff. Below, the armies of darkness gathered in the shadowy valley.",
+        "Captain Sarah Martinez floated weightlessly in the observation deck of the starship Enterprise. Through the massive viewport, she watched as the alien mothership approached.",
+        "The old lighthouse keeper climbed the spiral stairs one last time. Outside, the storm raged against the rocky cliffs."
+    ]
+    
+    for i, ctx in enumerate(contexts, 1):
+        scene = extract_scene(context_text=ctx)
+        tokens = len(scene.split())
+        print(f"Test {i}: Extracted scene ({tokens} tokens): {scene}")
