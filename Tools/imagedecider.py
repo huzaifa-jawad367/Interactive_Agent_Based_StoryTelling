@@ -1,93 +1,88 @@
-import json
-from typing import Any, Dict
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from smolagents import tool
+import warnings
+warnings.filterwarnings("ignore")
 
-from your_tool_base import Tool  # Replace with your actual Tool base class
-from your_inference_client import InferenceClientModel  # Replace with your actual HF client import
+# ——————————————————————————————
+# Global Mistral-7B-Instruct model for change detection
+CHOICE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
+_tokenizer_ch = AutoTokenizer.from_pretrained(CHOICE_MODEL)
+_model_ch = AutoModelForCausalLM.from_pretrained(
+    CHOICE_MODEL,
+    device_map="auto",
+    torch_dtype=torch.bfloat16
+)
+_model_ch.eval()
+# ——————————————————————————————
 
-model_name = "meta-llama/Llama-2-7b-chat-hf"
-HF_TOKEN = "your_hf_token_here"  # Ensure your HF token is set in environment or replaced here
-
-class CheckSignificantChangeTool(Tool):
+@tool
+def check_significant_change(previous_context: str, current_context: str) -> int:
     """
-    Compares two context windows (previous and current) and returns:
-      - 1 if there is a significant change (e.g., a new major scene or environment change)
-      - 0 otherwise.
+    Compare previous and current context; return 1 if major change (new scene/env), else 0.
+    
+    Args:
+        previous_context (str): The previous context text
+        current_context (str): The current context text
+    
+    Returns:
+        int: 1 if major significant change detected, 0 otherwise
     """
+    prompt = f"""
+Compare these two contexts and determine if there is a major significant change (like a new scene, environment, or dramatic shift in situation). Reply with only "change" for a major significant change, or "unchange" if the contexts are similar or show minor differences.
 
-    name = "check_significant_change"
-    description = """
-    Given the previous context window and the current context window (each containing the last N scenes
-    and current facts as JSON), determine if a major or visually important scene change has occurred.
-    Return exactly 1 if there is a significant change (new environment, major plot shift) or 0 if not.
-    """
+Previous: {previous_context}
+Current: {current_context}
 
-    inputs = {
-        "previous_context": {
-            "type": "string",
-            "description": "The previous context window (last N scenes + facts).",
-            "required": True,
-        },
-        "current_context": {
-            "type": "string",
-            "description": "The current context window (last N scenes + facts).",
-            "required": True,
-        }
-    }
-    output_type = "int"  # 1 or 0
+Answer (change or unchange):"""
 
-    _hf_client: InferenceClientModel = None
+    # wrap in a chat template
+    messages = [
+        {"role": "system", "content": "You detect significant changes between contexts. Reply only with 'change' or 'unchange'."},
+        {"role": "user", "content": prompt}
+    ]
 
-    def _get_hf_client(self) -> InferenceClientModel:
-        """
-        Lazy-instantiates a single InferenceClientModel for the HF chat endpoint.
-        """
-        if CheckSignificantChangeTool._hf_client is None:
-            CheckSignificantChangeTool._hf_client = InferenceClientModel(
-                model_name=model_name,
-                api_token=HF_TOKEN
-            )
-        return CheckSignificantChangeTool._hf_client
+    # tokenize & move to device
+    inputs = _tokenizer_ch.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True
+    ).to(_model_ch.device)
 
-    def forward(self, previous_context: str, current_context: str) -> int:
-        """
-        Compare previous_context and current_context. Return 1 if a significant change
-        (new major scene or environment shift) is detected; otherwise return 0.
-        """
-        prompt = f"""
-You are an assistant that compares two story context windows and determines whether a significant change has occurred.
-A significant change means a new major scene, environment shift, or a visually important moment that was not present before.
-
-Previous Context:
-\"\"\"
-{previous_context}
-\"\"\"
-
-Current Context:
-\"\"\"
-{current_context}
-\"\"\"
-
-Respond with exactly one number:
-- 1 if there is a significant change (new room, new major event, or scene shift)
-- 0 if there is no significant change (story continues in the same setting without a major shift)
-"""
-
-        system_msg = {
-            "role": "system",
-            "content": "You compare story contexts and return 1 or 0 based on significant change."
-        }
-        user_msg = {"role": "user", "content": prompt}
-
-        hf_client = self._get_hf_client()
-        resp = hf_client.chat(
-            messages=[system_msg, user_msg],
+    # generate
+    with torch.no_grad():
+        outputs = _model_ch.generate(
+            **inputs,
+            max_new_tokens=10,
             temperature=0.0,
-            max_tokens=10
+            do_sample=False,
+            pad_token_id=_tokenizer_ch.eos_token_id
         )
 
-        # Extract the first integer (1 or 0) from the model response
-        text = resp.strip()
-        if text.startswith("1"):
-            return 1
-        else:
-            return 0
+    # slice off prompt
+    prompt_len = inputs["input_ids"].shape[-1]
+    gen_ids = outputs[0][prompt_len:]
+
+    # decode response
+    raw = _tokenizer_ch.decode(gen_ids, skip_special_tokens=True)
+    response = raw.strip().lower()
+
+    # check for change indicators
+    if "change" in response and "unchange" not in response:
+        return 1
+    else:
+        return 0
+
+if __name__ == "__main__":
+    # --- Test Cases ---
+    tests = [
+        ("John types at his desk in the morning light.", "John now types with a cup of coffee beside him."),
+        ("Sarah walks through the quiet library browsing books.", "She stands on a cliff overlooking crashing waves."),
+        ("Morning vendors set up at the market.", "The empty market is silent under the moonlight.")
+    ]
+    
+    for i, (prev, curr) in enumerate(tests, 1):
+        result = check_significant_change(previous_context=prev, current_context=curr)
+        print(f"Test {i}: Prev='{prev}' | Curr='{curr}' -> Change Detected: {result}")
