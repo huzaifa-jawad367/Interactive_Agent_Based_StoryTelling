@@ -3,21 +3,10 @@
 from typing import Dict, Any
 from smolagents import Tool
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from llm_utils import tokenizer, model, generate_completion
 import torch
 import os
 import json
-
-# Local model to use for fact extraction
-MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
-
-# Cache tokenizer and model at class‐level so we only load once
-_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-_model     = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    device_map="auto",
-    torch_dtype=torch.bfloat16
-)
-_model.eval()
 
 
 class ExtractFactsTool(Tool):
@@ -63,25 +52,25 @@ class ExtractFactsTool(Tool):
         # 2) Tokenize using the chat template
         # The output of apply_chat_template with return_tensors="pt" is a single tensor.
         # It does not need to be converted to a dictionary for model.generate.
-        inputs_tensor = _tokenizer.apply_chat_template(
+        inputs_tensor = tokenizer.apply_chat_template(
             [{"role":"system","content":"You extract JSON facts."},
              {"role":"user","content":prompt}],
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt"
-        ).to(_model.device)
+        ).to(model.device)
 
         # 3) Generate up to 256 new tokens
         with torch.no_grad():
             # Pass the tensor directly to generate
-            outputs = _model.generate(inputs_tensor, max_new_tokens=256)
+            outputs = model.generate(inputs_tensor, max_new_tokens=256)
 
         # 4) Slice off the prompt tokens
         input_len = inputs_tensor.size(-1) # Use inputs_tensor to get the original input length
         gen_ids   = outputs[0][input_len:]
 
         # 5) Decode and strip out anything before the first '{'
-        raw = _tokenizer.decode(gen_ids, skip_special_tokens=True)
+        raw = tokenizer.decode(gen_ids, skip_special_tokens=True)
         json_start = raw.find("{")
         candidate = raw[json_start:] if json_start >= 0 else raw
 
